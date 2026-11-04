@@ -6,8 +6,7 @@ incluir las FX Options en el MtM de cartera: la app le envía las opciones y el
 mercado que guarda el valorizador, y la API devuelve el MtM. También puede
 trabajar con las planillas del correo diario y trae un menú Streamlit propio. El motor de valorización es el mismo del proyecto
 `FX Options Valorización` (Garman-Kohlhagen sobre forward, superficie de
-volatilidad Bloomberg interpolada por plazo y strike, descuento con curva CLP),
-validado al centavo contra el maestro Excel/VBA.
+volatilidad Bloomberg interpolada por plazo y strike, descuento con curva CLP).
 
 ## Estructura
 
