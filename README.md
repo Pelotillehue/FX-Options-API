@@ -1,8 +1,10 @@
 # API de valorización de Opciones FX (USD/CLP)
 
-API REST (FastAPI) que calcula el MtM de la cartera vigente de opciones FX
-europeas USD/CLP y el payoff de las operaciones que vencen, más un menú en
-Streamlit que la consume. El motor de valorización es el mismo del proyecto
+API REST (FastAPI) que calcula el MtM de opciones FX europeas USD/CLP y el
+payoff de las que vencen. La usa la app del Valorizador de Derivados para
+incluir las FX Options en el MtM de cartera: la app le envía las opciones y el
+mercado que guarda el valorizador, y la API devuelve el MtM. También puede
+trabajar con las planillas del correo diario y trae un menú Streamlit propio. El motor de valorización es el mismo del proyecto
 `FX Options Valorización` (Garman-Kohlhagen sobre forward, superficie de
 volatilidad Bloomberg interpolada por plazo y strike, descuento con curva CLP),
 validado al centavo contra el maestro Excel/VBA.
@@ -52,7 +54,44 @@ streamlit run menu_mtm.py --server.port 8502         # menú: http://localhost:8
 Los puertos 8001 y 8502 evitan chocar con el Valorizador de Derivados
 (API en 8000 y app en 8501).
 
-## Endpoints (prefijo `/fx-options`)
+## Endpoints con datos en JSON (los usa el Valorizador de Derivados)
+
+| Método | Ruta | Qué hace |
+|---|---|---|
+| GET  | `/fx-options/salud` | Estado del servicio (sin clave) |
+| POST | `/fx-options/valorizacion` | MtM de una lista de opciones a una fecha, con el mercado enviado |
+| POST | `/fx-options/liquidacion` | Payoff de opciones con el fixing del vencimiento |
+
+`/valorizacion` recibe:
+
+```json
+{
+  "fecha_proceso": "2026-08-21",
+  "moneda": "CLP",
+  "mercado": {
+    "spot": 917.74878,
+    "curva": [{"dias": 1, "tasa_clp": 0.0475, "tasa_usd": 0.0431}],
+    "volatilidades": [{"plazo": "1M", "atm": 0.1012, "call25": 0.1061, "put25": 0.0995,
+                       "call10": 0.1135, "put10": 0.1003}]
+  },
+  "operaciones": [{"deal_number": "OPT100212", "posicion": "VENTA", "tipo_opcion": "CALL",
+                   "nocional": 500000, "strike": 930, "fecha_vencimiento": "2026-08-25"}]
+}
+```
+
+- `spot` y `curva` son los de `GET /mercado/cotizaciones-swap/IRS_CLPCAM` del valorizador
+  (`spot` y `nodos`), y `volatilidades`, los `puntos` de `GET /mercado/volatilidades/USDCLP`;
+  se envían tal cual (los campos extra se ignoran). Tasas y volatilidades en tanto por uno.
+  En la superficie basta call/put de 25 y 10 delta o RR/BF.
+- `operaciones` acepta los objetos de `GET /fx-options` del valorizador tal cual.
+- Devuelve por operación `mtm`, `mtm_clp`, `forward`, `volatilidad`, `factor_descuento` y
+  `dias`. Una operación que no se puede valorizar (par distinto de USD/CLP, no europea, ya
+  vencida) queda con `mtm` nulo y el motivo en `error`, sin detener las demás.
+- Con los datos de mercado del 2026-08-21, el MtM coincide con el calculado desde las
+  planillas (diferencia máxima 0,0006 CLP, por el redondeo a 10 decimales de las tasas en
+  la base del valorizador).
+
+## Endpoints con las planillas del correo (prefijo `/fx-options`)
 
 | Método | Ruta | Qué hace |
 |---|---|---|

@@ -3,6 +3,12 @@ API REST de valorización de Opciones FX (USD/CLP).
 
 Endpoints (prefijo /fx-options):
   GET  /salud                    estado del servicio
+
+  Con datos en JSON (operaciones y mercado del Valorizador de Derivados):
+  POST /valorizacion             MtM de una lista de operaciones a una fecha
+  POST /liquidacion              payoff de operaciones con el fixing del vencimiento
+
+  Con las planillas del correo (Grid Vol y Operaciones Diarias):
   POST /mtm                      MtM y P&L no realizado de la cartera vigente
   POST /payoff                   payoff y P&L de las operaciones que vencen
   POST /calculo                  MtM + payoff en una sola llamada
@@ -37,8 +43,10 @@ import shutil
 import tempfile
 from contextlib import contextmanager
 from datetime import date
+from typing import Literal
 from typing import Optional
 
+from pydantic import BaseModel, ConfigDict, Field
 from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, UploadFile
 from fastapi.responses import Response
 
@@ -140,11 +148,101 @@ _TIPOS_MIME = {
 
 
 # --------------------------------------------------------------------------
+# Esquemas JSON. Aceptan los objetos tal como los entrega la API del
+# Valorizador de Derivados (los campos extra se ignoran).
+# --------------------------------------------------------------------------
+class _Flexible(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+
+class NodoCurva(_Flexible):
+    """Nodo de GET /mercado/cotizaciones-swap/IRS_CLPCAM, tasas en tanto por uno."""
+    dias: int = Field(gt=0)
+    tasa_clp: Optional[float] = None
+    tasa_usd: Optional[float] = None
+
+
+class PuntoVolatilidad(_Flexible):
+    """Plazo de GET /mercado/volatilidades/USDCLP, en tanto por uno. Basta
+    call/put de 25 y 10 delta o RR/BF."""
+    plazo: str
+    atm: float = Field(gt=0)
+    call25: Optional[float] = None
+    put25: Optional[float] = None
+    call10: Optional[float] = None
+    put10: Optional[float] = None
+    rr25: Optional[float] = None
+    bf25: Optional[float] = None
+    rr10: Optional[float] = None
+    bf10: Optional[float] = None
+
+
+class Mercado(_Flexible):
+    spot: float = Field(gt=0, description="USDCLP spot")
+    curva: list[NodoCurva] = Field(min_length=1)
+    volatilidades: list[PuntoVolatilidad] = Field(min_length=1)
+
+
+class OperacionFxOption(_Flexible):
+    """Campos de GET /fx-options del Valorizador que usa el cálculo."""
+    deal_number: str
+    posicion: str = Field(description="COMPRA o VENTA")
+    tipo_opcion: str = Field(description="CALL o PUT")
+    nocional: float = Field(gt=0)
+    strike: float = Field(gt=0)
+    fecha_vencimiento: date
+    fecha_negociacion: Optional[date] = None
+    moneda_principal: str = "USD"
+    moneda_secundaria: str = "CLP"
+    tipo_ejercicio: str = "EUROPEA"
+
+
+class SolicitudValorizacion(BaseModel):
+    fecha_proceso: date
+    moneda: Literal["CLP", "USD"] = "CLP"
+    mercado: Mercado
+    operaciones: list[OperacionFxOption]
+
+
+class SolicitudLiquidacion(BaseModel):
+    fixing: float = Field(gt=0, description="USD observado de la fecha de vencimiento")
+    operaciones: list[OperacionFxOption]
+
+
+# --------------------------------------------------------------------------
 # Endpoints
 # --------------------------------------------------------------------------
 @app.get("/fx-options/salud", tags=["Servicio"])
 def salud():
     return {"estado": "ok", "version": VERSION}
+
+
+@app.post("/fx-options/valorizacion", tags=["Cálculo con JSON"], dependencies=protegido,
+          summary="MtM de operaciones con mercado en JSON")
+def valorizacion(sol: SolicitudValorizacion):
+    """MtM (Garman-Kohlhagen) de cada operación a `fecha_proceso`, con el
+    spot y la curva de la tabla IRS CLPCAM y la superficie de volatilidad
+    USDCLP. Una operación que no se puede valorizar queda con `mtm` nulo y el
+    motivo en `error`. La selección de operaciones vigentes la hace quien
+    llama."""
+    try:
+        return servicio_mtm.valorizar_operaciones(
+            sol.fecha_proceso, sol.mercado.model_dump(),
+            [o.model_dump() for o in sol.operaciones], sol.moneda)
+    except ValueError as e:
+        raise HTTPException(422, str(e))
+
+
+@app.post("/fx-options/liquidacion", tags=["Cálculo con JSON"], dependencies=protegido,
+          summary="Payoff de operaciones al vencimiento")
+def liquidacion(sol: SolicitudLiquidacion):
+    """Payoff en CLP con el fixing: CALL máx(fixing − strike, 0), PUT
+    máx(strike − fixing, 0), por el nocional; negativo si la institución vende."""
+    try:
+        return servicio_mtm.liquidar_operaciones(
+            sol.fixing, [o.model_dump() for o in sol.operaciones])
+    except ValueError as e:
+        raise HTTPException(422, str(e))
 
 
 @app.post("/fx-options/mtm", tags=["Cálculo"], dependencies=protegido,

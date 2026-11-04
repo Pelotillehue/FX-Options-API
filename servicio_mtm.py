@@ -160,3 +160,179 @@ def calcular_todo(grid_path, ops_path, fecha_proceso=None, nombre_ops=None):
     out.update(mtm=dict(operaciones=f_mtm, totales=t_mtm),
                payoff=dict(vencimientos=f_pay, totales=t_pay))
     return out
+
+
+# ==========================================================================
+# Cálculo con datos en JSON (operaciones y mercado del Valorizador de
+# Derivados), sin planillas.
+# ==========================================================================
+from fx_options_valuation import MarketData, Operacion, liquidar_vencimiento
+from load_market import tasa_plausible
+
+## Días de cada unidad de plazo de la superficie, como en los tenores
+## estándar del motor (1W=7, 1M=30, 18M=540, 1Y=365, 2Y=730).
+_DIAS_UNIDAD = {"D": 1, "W": 7, "M": 30, "Y": 365}
+
+
+def dias_plazo(plazo):
+    """'1W' -> 7, '18M' -> 540, '2Y' -> 730."""
+    p = str(plazo).strip().upper()
+    if len(p) < 2 or p[-1] not in _DIAS_UNIDAD or not p[:-1].isdigit():
+        raise ValueError(f"plazo de volatilidad no reconocido: {plazo!r}")
+    return int(p[:-1]) * _DIAS_UNIDAD[p[-1]]
+
+
+def _vol_put_call(p):
+    """(put10, put25, atm, call25, call10) en tanto por uno. Usa call/put si
+    vienen; si no, los deduce de ATM, RR y BF: call = ATM + RR/2 + BF,
+    put = ATM - RR/2 + BF."""
+    def g(k):
+        return p.get(k)
+    if all(g(k) is not None for k in ("call25", "put25", "call10", "put10")):
+        return g("put10"), g("put25"), g("atm"), g("call25"), g("call10")
+    if all(g(k) is not None for k in ("rr25", "bf25", "rr10", "bf10")):
+        a = g("atm")
+        return (a - g("rr10") / 2 + g("bf10"), a - g("rr25") / 2 + g("bf25"), a,
+                a + g("rr25") / 2 + g("bf25"), a + g("rr10") / 2 + g("bf10"))
+    raise ValueError(f"plazo {p.get('plazo')}: faltan call/put o RR/BF de 25 y 10 delta")
+
+
+def mercado_desde_datos(fecha_proceso, spot, curva, volatilidades):
+    """Arma el MarketData del motor desde datos en tanto por uno.
+
+    curva: nodos de la tabla IRS CLPCAM, cada uno con 'dias', 'tasa_clp' y
+           'tasa_usd' (puede faltar). Misma regla que la planilla: la curva CLP
+           usa todos los nodos con tasa CLP y la USD sólo los que traen tasa USD.
+    volatilidades: plazos de la superficie USDCLP con 'plazo', 'atm' y call/put
+           (o RR/BF) de 25 y 10 delta.
+    """
+    if not spot or spot <= 0:
+        raise ValueError("spot USDCLP inválido")
+    nodos = sorted((dict(n) for n in curva), key=lambda n: n["dias"])
+    clp_dias, clp, usd_dias, usd = [], [], [], []
+    raw_dias, raw_clp, raw_usd = [], [], []
+    avisos = []
+    for n in nodos:
+        d = float(n["dias"])
+        rc = None if n.get("tasa_clp") is None else n["tasa_clp"] * 100
+        ru = None if n.get("tasa_usd") is None else n["tasa_usd"] * 100
+        if rc is not None and not tasa_plausible(rc):
+            avisos.append(f"curva CLP: nodo {int(d)}d con tasa implausible ({rc:.4g}%)")
+        if ru is not None and not tasa_plausible(ru):
+            avisos.append(f"curva USD: nodo {int(d)}d con tasa implausible ({ru:.4g}%)")
+        if rc is not None:
+            clp_dias.append(d); clp.append(rc)
+        if ru is not None:
+            usd_dias.append(d); usd.append(ru)
+        if rc is not None and ru is not None:
+            raw_dias.append(d); raw_clp.append(rc); raw_usd.append(ru)
+    if not clp_dias or not usd_dias:
+        raise ValueError("la curva necesita al menos un nodo con tasa CLP y uno con tasa USD")
+    puntos = sorted(((dias_plazo(p["plazo"]), _vol_put_call(p)) for p in volatilidades),
+                    key=lambda x: x[0])
+    if not puntos:
+        raise ValueError("la superficie de volatilidad está vacía")
+    md = MarketData(
+        fecha_proceso=fecha_proceso, spot=float(spot),
+        raw_dias=raw_dias, raw_clp=raw_clp, raw_usd=raw_usd,
+        vol_tenor_dias=[d for d, _ in puntos],
+        vol_smile=[tuple(v * 100 for v in s) for _, s in puntos],
+        clp_dias=clp_dias, clp_rates=clp, usd_dias=usd_dias, usd_rates=usd,
+        avisos=avisos)
+    return md.build()
+
+
+_LADO = {"COMPRA": "Compra", "VENTA": "Venta"}
+
+
+def _validar_op(op):
+    """Motivo por el que la operación no se puede valorizar, o None."""
+    par = (op.get("moneda_principal") or "USD", op.get("moneda_secundaria") or "CLP")
+    if tuple(m.upper() for m in par) != ("USD", "CLP"):
+        return f"par {par[0]}/{par[1]} no soportado: sólo USD/CLP"
+    if (op.get("tipo_ejercicio") or "EUROPEA").upper() != "EUROPEA":
+        return "sólo se valorizan opciones europeas"
+    if str(op.get("tipo_opcion", "")).upper() not in ("CALL", "PUT"):
+        return f"tipo_opcion inválido: {op.get('tipo_opcion')!r}"
+    if str(op.get("posicion", "")).upper() not in _LADO:
+        return f"posicion inválida: {op.get('posicion')!r}"
+    return None
+
+
+def _operacion_motor(op):
+    return Operacion(
+        folio=op["deal_number"], fecha_inicio=op.get("fecha_negociacion"),
+        fecha_vencimiento=op["fecha_vencimiento"],
+        tipo=str(op["tipo_opcion"]).upper(), lado=_LADO[str(op["posicion"]).upper()],
+        nominal=float(op["nocional"]), strike=float(op["strike"]))
+
+
+def valorizar_operaciones(fecha_proceso, mercado, operaciones, moneda="CLP"):
+    """MtM de cada operación a la fecha de proceso.
+
+    mercado: dict con 'spot', 'curva' y 'volatilidades' (ver mercado_desde_datos).
+    operaciones: dicts con los campos de GET /fx-options del Valorizador
+      (deal_number, posicion, tipo_opcion, nocional, strike, fecha_vencimiento,
+      moneda_principal, moneda_secundaria).
+    moneda: 'CLP' o 'USD'; el MtM en USD es el de CLP dividido por el spot.
+    Una operación que no se puede valorizar queda con mtm None y el motivo en
+    'error'; no detiene las demás."""
+    moneda = (moneda or "CLP").upper()
+    if moneda not in ("CLP", "USD"):
+        raise ValueError("moneda debe ser CLP o USD")
+    md = mercado_desde_datos(fecha_proceso, mercado["spot"], mercado["curva"],
+                             mercado["volatilidades"])
+    filas = []
+    for op in operaciones:
+        fila = dict(deal_number=op.get("deal_number"), dias=None, forward=None,
+                    volatilidad=None, factor_descuento=None, mtm_clp=None, mtm=None,
+                    error=_validar_op(op))
+        if fila["error"] is None:
+            try:
+                dias = (servicio_fecha(op["fecha_vencimiento"]) - md.fecha_proceso).days
+                if dias <= 0:
+                    raise ValueError("la operación ya venció a la fecha de proceso")
+                r = _operacion_motor(op).valorizar(md)
+                fila.update(dias=r["dias"], forward=r["forward"],
+                            volatilidad=r["vol"] / 100, factor_descuento=md.df_clp_at(r["dias"]),
+                            mtm_clp=r["mtm"],
+                            mtm=r["mtm"] if moneda == "CLP" else r["mtm"] / md.spot)
+            except (ValueError, TypeError, KeyError, ZeroDivisionError) as e:
+                fila["error"] = str(e)
+        filas.append(fila)
+    ok = [f for f in filas if f["mtm"] is not None]
+    return dict(fecha_proceso=md.fecha_proceso, moneda=moneda, spot=md.spot,
+                mtm_total=sum(f["mtm"] for f in ok), valorizadas=len(ok),
+                con_error=len(filas) - len(ok), avisos=list(md.avisos or []),
+                operaciones=filas)
+
+
+def liquidar_operaciones(fixing, operaciones):
+    """Payoff en CLP de cada operación con el fixing (USD observado) del
+    vencimiento: CALL máx(fixing − strike, 0), PUT máx(strike − fixing, 0), por
+    el nocional; negativo si la institución vende."""
+    if not fixing or fixing <= 0:
+        raise ValueError("fixing inválido")
+    filas = []
+    for op in operaciones:
+        fila = dict(deal_number=op.get("deal_number"), fixing=float(fixing),
+                    itm=None, payoff_clp=None, error=_validar_op(op))
+        if fila["error"] is None:
+            liq = liquidar_vencimiento(_operacion_motor(op), float(fixing))
+            fila.update(itm=liq["itm"], payoff_clp=liq["flujo_pago_clp"])
+        filas.append(fila)
+    pagos = [f["payoff_clp"] for f in filas if f["payoff_clp"] is not None]
+    return dict(fixing=float(fixing), payoff_neto_clp=sum(pagos),
+                recibido_clp=sum(p for p in pagos if p > 0),
+                pagado_clp=-sum(p for p in pagos if p < 0),
+                itm=sum(1 for f in filas if f["itm"]), operaciones=filas)
+
+
+def servicio_fecha(x):
+    """date desde date/datetime/str ISO."""
+    from datetime import datetime
+    if isinstance(x, datetime):
+        return x.date()
+    if isinstance(x, date):
+        return x
+    return date.fromisoformat(str(x)[:10])
