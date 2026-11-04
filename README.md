@@ -4,8 +4,7 @@ API REST (FastAPI) que calcula el MtM de la cartera vigente de opciones FX
 europeas USD/CLP y el payoff de las operaciones que vencen, más un menú en
 Streamlit que la consume. El motor de valorización es el mismo del proyecto
 `FX Options Valorización` (Garman-Kohlhagen sobre forward, superficie de
-volatilidad Bloomberg interpolada por plazo y strike, descuento con curva CLP),
-validado al centavo contra el maestro Excel/VBA.
+volatilidad Bloomberg interpolada por plazo y strike, descuento con curva CLP).
 
 ## Estructura
 
