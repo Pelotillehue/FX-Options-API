@@ -1,0 +1,5 @@
+# Desarrollo: API + menú + pruebas
+-r requirements.txt
+-r requirements-menu.txt
+pytest>=8.0
+httpx>=0.27

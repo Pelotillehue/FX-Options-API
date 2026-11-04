@@ -1,0 +1,3 @@
+# Menú Streamlit (se usa en el PC, no se despliega en Heroku)
+streamlit>=1.50
+requests>=2.31
