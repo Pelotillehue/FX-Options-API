@@ -5,7 +5,8 @@ Endpoints (prefijo /fx-options):
   GET  /salud                    estado del servicio
 
   Con datos en JSON (operaciones y mercado del Valorizador de Derivados):
-  POST /valorizacion             MtM de una lista de operaciones a una fecha
+  POST /valorizacion             MtM y griegas (Delta, Gamma, Vega) de una lista
+                                 de operaciones a una fecha
   POST /liquidacion              payoff de operaciones con el fixing del vencimiento
 
   Con las planillas del correo (Grid Vol y Operaciones Diarias):
@@ -56,7 +57,7 @@ from daily_process import procesar
 from dateparse import parse_fecha
 
 BASE = os.path.dirname(os.path.abspath(__file__))
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 
 app = FastAPI(
     title="API Valorización Opciones FX USD/CLP",
@@ -218,11 +219,14 @@ def salud():
 
 
 @app.post("/fx-options/valorizacion", tags=["Cálculo con JSON"], dependencies=protegido,
-          summary="MtM de operaciones con mercado en JSON")
+          summary="MtM y griegas de operaciones con mercado en JSON")
 def valorizacion(sol: SolicitudValorizacion):
     """MtM (Garman-Kohlhagen) de cada operación a `fecha_proceso`, con el
     spot y la curva de la tabla IRS CLPCAM y la superficie de volatilidad
-    USDCLP. Una operación que no se puede valorizar queda con `mtm` nulo y el
+    USDCLP. Devuelve además Delta spot, Gamma spot y Vega de cada operación,
+    unitarias (`delta`, `gamma`, `vega`) y en monto con signo desde la
+    institución (`delta_usd`, `gamma_usd_1pct`, `vega_clp_1pt`), y sus totales.
+    Una operación que no se puede valorizar queda con `mtm` nulo y el
     motivo en `error`. La selección de operaciones vigentes la hace quien
     llama."""
     try:

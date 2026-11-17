@@ -58,7 +58,7 @@ Los puertos 8001 y 8502 evitan chocar con el Valorizador de Derivados
 | Método | Ruta | Qué hace |
 |---|---|---|
 | GET  | `/fx-options/salud` | Estado del servicio (sin clave) |
-| POST | `/fx-options/valorizacion` | MtM de una lista de opciones a una fecha, con el mercado enviado |
+| POST | `/fx-options/valorizacion` | MtM y griegas (Delta, Gamma y Vega) de una lista de opciones a una fecha, con el mercado enviado |
 | POST | `/fx-options/liquidacion` | Payoff de opciones con el fixing del vencimiento |
 
 `/valorizacion` recibe:
@@ -86,6 +86,23 @@ Los puertos 8001 y 8502 evitan chocar con el Valorizador de Derivados
 - Devuelve por operación `mtm`, `mtm_clp`, `forward`, `volatilidad`, `factor_descuento` y
   `dias`. Una operación que no se puede valorizar (par distinto de USD/CLP, no europea, ya
   vencida) queda con `mtm` nulo y el motivo en `error`, sin detener las demás.
+- Devuelve también las griegas de cada operación, calculadas con Garman-Kohlhagen y los
+  mismos insumos del MtM (forward, volatilidad interpolada y descuento), y sus totales:
+
+  | Campo | Qué es | Unidad |
+  |---|---|---|
+  | `delta` | Delta spot de la opción comprada, sin ajuste por prima | USD por USD de nocional |
+  | `gamma` | Cambio de la delta por 1 peso de spot | 1 / CLP |
+  | `vega` | Cambio de la prima por 1,00 de volatilidad | CLP por USD de nocional |
+  | `delta_usd` | Posición spot equivalente: nocional × delta, con signo | USD |
+  | `gamma_usd_1pct` | Cambio de `delta_usd` si el spot sube 1% | USD |
+  | `vega_clp_1pt` | Cambio del MtM si la volatilidad sube 1 punto (de 10% a 11%) | CLP |
+
+  Los montos llevan signo desde la institución (compra suma, venta resta) y se suman en
+  `delta_usd_total`, `gamma_usd_1pct_total` y `vega_clp_1pt_total`. Con FD_USD = FD_CLP ×
+  forward / spot y t = días/365: delta call = FD_USD × N(d1), delta put = FD_USD × (N(d1) − 1),
+  gamma = FD_USD × N'(d1) / (spot × σ × √t) y vega = spot × FD_USD × √t × N'(d1). La
+  volatilidad de cada opción se mantiene fija al mover el spot (sticky strike).
 - Con los datos de mercado del 2026-08-21, el MtM coincide con el calculado desde las
   planillas (diferencia máxima 0,0006 CLP, por el redondeo a 10 decimales de las tasas en
   la base del valorizador).

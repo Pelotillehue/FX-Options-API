@@ -267,8 +267,23 @@ def _operacion_motor(op):
         nominal=float(op["nocional"]), strike=float(op["strike"]))
 
 
+# Griegas en monto, con signo desde la institución; se suman en los totales.
+_GRIEGAS_MONTO = ("delta_usd", "gamma_usd_1pct", "vega_clp_1pt")
+# Griegas de cada fila: unitarias (opción comprada) y en monto.
+_GRIEGAS = ("delta", "gamma", "vega") + _GRIEGAS_MONTO
+
+
 def valorizar_operaciones(fecha_proceso, mercado, operaciones, moneda="CLP"):
-    """MtM de cada operación a la fecha de proceso.
+    """MtM y griegas (Delta spot, Gamma spot y Vega) de cada operación a la
+    fecha de proceso.
+
+    Griegas por fila: 'delta', 'gamma' y 'vega' unitarias, de la opción
+    comprada (ver fx_options_valuation.griegas_option_fx), y en monto con signo
+    desde la institución: 'delta_usd' (posición spot equivalente),
+    'gamma_usd_1pct' (cambio de delta_usd si el spot sube 1%) y 'vega_clp_1pt'
+    (cambio del MtM en CLP si la volatilidad sube 1 punto). Los totales
+    'delta_usd_total', 'gamma_usd_1pct_total' y 'vega_clp_1pt_total' suman las
+    operaciones valorizadas. Las griegas no dependen de 'moneda'.
 
     mercado: dict con 'spot', 'curva' y 'volatilidades' (ver mercado_desde_datos).
     operaciones: dicts con los campos de GET /fx-options del Valorizador
@@ -286,13 +301,16 @@ def valorizar_operaciones(fecha_proceso, mercado, operaciones, moneda="CLP"):
     for op in operaciones:
         fila = dict(deal_number=op.get("deal_number"), dias=None, forward=None,
                     volatilidad=None, factor_descuento=None, mtm_clp=None, mtm=None,
-                    error=_validar_op(op))
+                    **dict.fromkeys(_GRIEGAS), error=_validar_op(op))
         if fila["error"] is None:
             try:
                 dias = (servicio_fecha(op["fecha_vencimiento"]) - md.fecha_proceso).days
                 if dias <= 0:
                     raise ValueError("la operación ya venció a la fecha de proceso")
-                r = _operacion_motor(op).valorizar(md)
+                motor = _operacion_motor(op)
+                r = motor.valorizar(md)
+                g = motor.griegas(md) or {}
+                fila.update({k: g.get(k) for k in _GRIEGAS})
                 fila.update(dias=r["dias"], forward=r["forward"],
                             volatilidad=r["vol"] / 100, factor_descuento=md.df_clp_at(r["dias"]),
                             mtm_clp=r["mtm"],
@@ -302,7 +320,9 @@ def valorizar_operaciones(fecha_proceso, mercado, operaciones, moneda="CLP"):
         filas.append(fila)
     ok = [f for f in filas if f["mtm"] is not None]
     return dict(fecha_proceso=md.fecha_proceso, moneda=moneda, spot=md.spot,
-                mtm_total=sum(f["mtm"] for f in ok), valorizadas=len(ok),
+                mtm_total=sum(f["mtm"] for f in ok),
+                **{f"{k}_total": sum(f[k] or 0.0 for f in ok) for k in _GRIEGAS_MONTO},
+                valorizadas=len(ok),
                 con_error=len(filas) - len(ok), avisos=list(md.avisos or []),
                 operaciones=filas)
 

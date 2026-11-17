@@ -10,9 +10,13 @@ Replica exactamente:
   - GetFxForward -> forward USDCLP por paridad de tasas
   - MtM_Option_FX -> Black-Scholes (Garman-Kohlhagen, forward) x nominal
 
-Convenciones tomadas del VBA original:
+Agrega, fuera del VBA original, las griegas Delta spot, Gamma spot y Vega
+(griegas_option_fx y Operacion.griegas), con los mismos insumos del MtM.
+
+Convenciones:
   - Descuento Act/360 ; tiempo de la opcion Act/365
-  - Delta con ajuste por prima: -NORMSINV(delta*exp(r_usd*t))
+  - Delta spot sin ajuste por prima: -NORMSINV(delta/FD_USD), con
+    FD_USD = 1/(1 + r_usd*dias/360) (lineal Act/360)
 """
 
 from __future__ import annotations
@@ -33,6 +37,11 @@ def norm_s_dist(x: float) -> float:
 
 def normsinv(p: float) -> float:
     return _N.inv_cdf(p)
+
+
+def norm_s_pdf(x: float) -> float:
+    """Densidad de la normal estándar, N'(x)."""
+    return _N.pdf(x)
 
 
 def lin_interpol(plazos, tasas, plazo):
@@ -154,8 +163,10 @@ class VolSurface:
             df_usd = 1.0 / (1.0 + r_usd * dias / 360.0)
             fwd = md.spot * df_usd / df_clp
             t = dias / 365.0
-            j25 = -normsinv(0.25 * exp(r_usd * dias / 365.0))
-            k10 = -normsinv(0.10 * exp(r_usd * dias / 365.0))
+            # Alfa: se modifico a FD USD lineal Act/360 (antes exp(r_usd*dias/365)),
+            # pues las curvas de tasas estan en esa convencion.
+            j25 = -normsinv(0.25 / df_usd)
+            k10 = -normsinv(0.10 / df_usd)
             s10p = fwd * exp(-k10 * (v10p / 100.0) * sqrt(t) + 0.5 * (v10p / 100.0) ** 2 * t)
             s25p = fwd * exp(-j25 * (v25p / 100.0) * sqrt(t) + 0.5 * (v25p / 100.0) ** 2 * t)
             satm = fwd * exp(0.5 * (vatm / 100.0) ** 2 * t)
@@ -215,6 +226,39 @@ def mtm_option_fx(nominal, fx_fwd, strike, vol, df, plazo_dias, tipo, lado):
 
 
 # --------------------------------------------------------------------------
+# Griegas (Garman-Kohlhagen)
+# --------------------------------------------------------------------------
+def griegas_option_fx(spot, fx_fwd, strike, vol, df, plazo_dias, tipo):
+    """Delta spot, Gamma spot y Vega por unidad de moneda principal (USD),
+    para una opción comprada, con los mismos insumos del MtM.
+
+    El factor exp(-r_f*T) de Garman-Kohlhagen es el factor de descuento USD
+    implícito en el forward: FD_USD = FD_CLP * forward / spot (lineal Act/360,
+    como las curvas). Con d1 sobre el forward y t = dias/365:
+
+      delta call = FD_USD * N(d1)            delta put = FD_USD * (N(d1) - 1)
+      gamma      = FD_USD * N'(d1) / (spot * sigma * raiz(t))
+      vega       = spot * FD_USD * raiz(t) * N'(d1)
+
+    delta: USD por USD de nocional (sin ajuste por prima).
+    gamma: cambio de la delta por 1 peso de spot.
+    vega:  CLP por USD de nocional por 1,00 de volatilidad (100 puntos).
+    Gamma y vega son iguales para call y put. vol viene en %.
+    Devuelve None si el tipo no es CALL ni PUT."""
+    tipo = (tipo or "").strip().upper()
+    if tipo not in ("CALL", "PUT"):
+        return None
+    yf = plazo_dias / 365.0
+    sigma = vol / 100.0
+    d1 = _d1(fx_fwd, strike, vol, plazo_dias)
+    df_usd = df * fx_fwd / spot
+    delta = df_usd * (norm_s_dist(d1) - (0.0 if tipo == "CALL" else 1.0))
+    gamma = df_usd * norm_s_pdf(d1) / (spot * sigma * sqrt(yf))
+    vega = spot * df_usd * sqrt(yf) * norm_s_pdf(d1)
+    return {"delta": delta, "gamma": gamma, "vega": vega}
+
+
+# --------------------------------------------------------------------------
 # Operacion
 # --------------------------------------------------------------------------
 @dataclass
@@ -238,6 +282,31 @@ class Operacion:
         pl = (self.prima_clp + mtm) if abs(self.prima_clp) > 0 else 0.0
         return {"folio": self.folio, "dias": dias, "spot": md.spot,
                 "forward": fwd, "vol": vol, "mtm": mtm, "pl_no_realizado": pl}
+
+    def griegas(self, md: MarketData):
+        """Griegas de la operación con el mercado del día: unitarias (opción
+        comprada) y en monto, con signo desde la institución (Compra suma,
+        Venta resta).
+
+          delta_usd       posición spot equivalente en USD
+          gamma_usd_1pct  cambio de delta_usd si el spot sube 1%
+          vega_clp_1pt    cambio del MtM en CLP si la volatilidad sube 1 punto
+                          (por ejemplo de 10% a 11%)
+
+        Devuelve None si el tipo o el lado no se reconocen."""
+        dias = dias_vencimiento(md.fecha_proceso, self.fecha_vencimiento)
+        fwd = md.forward_at(self.fecha_vencimiento)
+        vol = md.surface.get_vol(dias, self.strike)
+        df = md.df_clp_at(dias)
+        g = griegas_option_fx(md.spot, fwd, self.strike, vol, df, dias, self.tipo)
+        lado = (self.lado or "").strip().capitalize()
+        if g is None or lado not in ("Compra", "Venta"):
+            return None
+        monto = self.nominal * (1.0 if lado == "Compra" else -1.0)
+        return {"folio": self.folio, "delta": g["delta"], "gamma": g["gamma"],
+                "vega": g["vega"], "delta_usd": monto * g["delta"],
+                "gamma_usd_1pct": monto * g["gamma"] * md.spot * 0.01,
+                "vega_clp_1pt": monto * g["vega"] * 0.01}
 
 
 def liquidar_vencimiento(op: "Operacion", fixing_usdobs: float):

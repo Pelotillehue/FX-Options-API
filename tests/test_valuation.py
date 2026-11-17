@@ -3,7 +3,8 @@ import math
 import pytest
 from fx_options_valuation import (MarketData, Operacion, lin_interpol,
                                   prima_call, prima_put, mtm_option_fx,
-                                  liquidar_vencimiento, dias_vencimiento)
+                                  liquidar_vencimiento, dias_vencimiento,
+                                  griegas_option_fx)
 
 
 def md_plano(spot=900.0, r_clp=5.0, r_usd=5.0, vol=10.0):
@@ -84,3 +85,50 @@ def test_call_otm():
 def test_put_itm_venta_paga():
     liq = liquidar_vencimiento(_op("PUT", "Venta"), fixing_usdobs=880.0)
     assert liq["itm"] and liq["flujo_pago_clp"] == pytest.approx(-20.0 * 1000)
+
+
+# ---------- griegas ----------
+def _precio(spot, vol, tipo="CALL", strike=900.0, r_clp=6.0, r_usd=4.0):
+    """Prima unitaria a 90 días con mercado plano: sólo cambian el spot y la volatilidad."""
+    md = md_plano(spot=spot, r_clp=r_clp, r_usd=r_usd, vol=vol)
+    return Operacion("X", None, date(2026, 4, 1), tipo, "Compra", 1.0, strike).valorizar(md)["mtm"]
+
+
+@pytest.mark.parametrize("tipo", ["CALL", "PUT"])
+def test_griegas_coinciden_con_diferencias_finitas(tipo):
+    spot, vol, strike = 900.0, 12.0, 910.0
+    md = md_plano(spot=spot, r_clp=6.0, r_usd=4.0, vol=vol)
+    g = Operacion("X", None, date(2026, 4, 1), tipo, "Compra", 1.0, strike).griegas(md)
+    h = 0.01
+    arriba, centro, abajo = (_precio(spot + d, vol, tipo, strike) for d in (h, 0.0, -h))
+    assert g["delta"] == pytest.approx((arriba - abajo) / (2 * h), rel=1e-6)
+    assert g["gamma"] == pytest.approx((arriba - 2 * centro + abajo) / h ** 2, rel=1e-4)
+    e = 0.001                                   # en puntos porcentuales de volatilidad
+    dvol = (_precio(spot, vol + e, tipo, strike) - _precio(spot, vol - e, tipo, strike)) / (2 * e / 100)
+    assert g["vega"] == pytest.approx(dvol, rel=1e-6)
+
+
+def test_griegas_call_put():
+    md = md_plano(spot=900.0, r_clp=6.0, r_usd=4.0, vol=12.0)
+    dias = 90
+    args = (md.spot, md.forward_at(date(2026, 4, 1)), 910.0, 12.0, md.df_clp_at(dias), dias)
+    c = griegas_option_fx(*args, "CALL")
+    p = griegas_option_fx(*args, "PUT")
+    df_usd = 1 / (1 + 0.04 * dias / 360)
+    assert c["delta"] - p["delta"] == pytest.approx(df_usd)     # paridad put-call
+    assert 0 < c["delta"] < 1 and -1 < p["delta"] < 0
+    assert c["gamma"] == pytest.approx(p["gamma"]) and c["gamma"] > 0
+    assert c["vega"] == pytest.approx(p["vega"]) and c["vega"] > 0
+    assert griegas_option_fx(*args, "OTRO") is None
+
+
+def test_griegas_en_monto_y_signo():
+    md = md_plano(spot=900.0, vol=12.0)
+    compra = Operacion("C", None, date(2026, 4, 1), "CALL", "Compra", 2_000_000, 910.0).griegas(md)
+    venta = Operacion("V", None, date(2026, 4, 1), "CALL", "Venta", 2_000_000, 910.0).griegas(md)
+    assert compra["delta_usd"] == pytest.approx(2_000_000 * compra["delta"])
+    assert compra["gamma_usd_1pct"] == pytest.approx(2_000_000 * compra["gamma"] * 900.0 * 0.01)
+    assert compra["vega_clp_1pt"] == pytest.approx(2_000_000 * compra["vega"] * 0.01)
+    for k in ("delta_usd", "gamma_usd_1pct", "vega_clp_1pt"):
+        assert venta[k] == pytest.approx(-compra[k])
+    assert venta["delta"] == pytest.approx(compra["delta"])     # la unitaria no cambia de signo

@@ -84,6 +84,25 @@ def test_api_valorizacion(cliente, md):
     assert usd["mtm_total"] == pytest.approx(clp["mtm_total"] / md.spot)
 
 
+def test_api_valorizacion_griegas(cliente, md):
+    cuerpo = {"fecha_proceso": "2026-07-14", "mercado": _mercado(md), "operaciones": OPS}
+    js = cliente.post("/fx-options/valorizacion", json=cuerpo).json()
+    filas = {f["deal_number"]: f for f in js["operaciones"]}
+    for o in OPS:
+        esperado = Operacion(o["deal_number"], None, o["fecha_vencimiento"], o["tipo_opcion"],
+                             o["posicion"].capitalize(), o["nocional"], o["strike"]).griegas(md)
+        for k in ("delta", "gamma", "vega", "delta_usd", "gamma_usd_1pct", "vega_clp_1pt"):
+            assert filas[o["deal_number"]][k] == pytest.approx(esperado[k], rel=1e-9)
+    assert 0 < filas["C1"]["delta"] < 1 and filas["P1"]["delta"] < 0
+    assert filas["C1"]["delta_usd"] > 0 > filas["V1"]["delta_usd"]
+    # C1 y V1 son la misma opción comprada y vendida: sólo queda la put
+    for k in ("delta_usd", "gamma_usd_1pct", "vega_clp_1pt"):
+        assert js[f"{k}_total"] == pytest.approx(filas["P1"][k])
+    # las griegas no dependen de la moneda del MtM
+    usd = cliente.post("/fx-options/valorizacion", json={**cuerpo, "moneda": "USD"}).json()
+    assert usd["delta_usd_total"] == pytest.approx(js["delta_usd_total"])
+
+
 def test_api_valorizacion_errores_por_operacion(cliente, md):
     ops = OPS + [
         {**OPS[0], "deal_number": "EUR", "moneda_principal": "EUR"},
@@ -94,6 +113,7 @@ def test_api_valorizacion_errores_por_operacion(cliente, md):
                      json={"fecha_proceso": "2026-07-14", "mercado": _mercado(md), "operaciones": ops})
     js = r.json()
     assert js["valorizadas"] == 3 and js["con_error"] == 3
+    assert all(f["delta_usd"] is None for f in js["operaciones"] if f["error"])
     err = {f["deal_number"]: f["error"] for f in js["operaciones"] if f["error"]}
     assert "no soportado" in err["EUR"]
     assert "venció" in err["VENCIDA"]

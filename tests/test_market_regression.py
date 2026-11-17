@@ -29,8 +29,12 @@ def test_forward_contra_maestro(md):
 
 
 def test_vol_contra_maestro(md):
-    # OPT100192: 8 dias, strike 930 -> vol cacheada en el maestro
-    assert md.surface.get_vol(8, 930) == pytest.approx(12.90101412099385, abs=1e-9)
+    # OPT100192: 8 dias, strike 930. El maestro (excel para cliente) daba 12.90101412099385 
+    # con el alfa antiguo, -NORMSINV(delta*exp(r_usd*dias/365)). Desde el 2026-11-11 el
+    # alfa usa el FD USD lineal Act/360, -NORMSINV(delta/FD_USD), pues las
+    # curvas de tasas estan en esa convencion, y el valor esperado es el del
+    # motor Python, no el del maestro.
+    assert md.surface.get_vol(8, 930) == pytest.approx(12.90101880035992, abs=1e-9)
 
 
 def test_strikes_superficie_contra_maestro(md):
